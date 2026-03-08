@@ -19,6 +19,7 @@ C_RESTAPI/
 ├── app/
 │   ├── __init__.py
 │   ├── main.py          # FastAPI app entry point
+│   ├── auth.py          # API key authorization dependency
 │   ├── config.py        # Environment variable settings
 │   ├── database.py      # MongoDB connection & indexes
 │   ├── logger.py        # Async logging to MongoDB logs collection
@@ -107,6 +108,29 @@ cattle_health_events:    { cid: 1 }, { timestamp: -1 }
 logs:                    { service: 1, timestamp: -1 }, { cid: 1 }
 ```
 
+## API Authorization
+
+All API endpoints (except the health check `/`) require a valid API key in the `X-API-Key` header.
+
+**Header:**
+```
+X-API-Key: cattle_monitoring_secure_key
+```
+
+**Example request:**
+```bash
+curl -H "X-API-Key: cattle_monitoring_secure_key" http://localhost:8000/api/v1/cattle
+```
+
+**Unauthorized response (401):**
+```json
+{ "detail": "Unauthorized request: Invalid API key" }
+```
+
+The API key is configured via the `API_SECRET_KEY` environment variable in `.env`. For deployment (Railway, Render, etc.), set this variable in the platform's environment settings.
+
+**ESP32 devices** must include the `X-API-Key` header in every HTTP request.
+
 ## Data Transformation
 
 ESP32 sends flat data → backend converts to structured format:
@@ -128,6 +152,7 @@ Register a new cattle in the system.
 ```bash
 curl -X POST http://localhost:8000/api/v1/cattle \
   -H "Content-Type: application/json" \
+  -H "X-API-Key: cattle_monitoring_secure_key" \
   -d '{ "cid": 1, "name": "Cow-01", "farm_id": "Farm-A", "breed": "HF", "age": 4, "status": "active" }'
 ```
 
@@ -140,7 +165,7 @@ curl -X POST http://localhost:8000/api/v1/cattle \
 List all registered cattle.
 
 ```bash
-curl http://localhost:8000/api/v1/cattle
+curl -H "X-API-Key: cattle_monitoring_secure_key" http://localhost:8000/api/v1/cattle
 ```
 
 **Response:**
@@ -155,7 +180,7 @@ curl http://localhost:8000/api/v1/cattle
 Get metadata for a specific cattle.
 
 ```bash
-curl http://localhost:8000/api/v1/cattle/1
+curl -H "X-API-Key: cattle_monitoring_secure_key" http://localhost:8000/api/v1/cattle/1
 ```
 
 **Response:**
@@ -169,6 +194,7 @@ Update cattle metadata. Only send fields you want to change.
 ```bash
 curl -X PUT http://localhost:8000/api/v1/cattle/1 \
   -H "Content-Type: application/json" \
+  -H "X-API-Key: cattle_monitoring_secure_key" \
   -d '{ "breed": "Jersey", "age": 5 }'
 ```
 
@@ -225,7 +251,7 @@ Health check — verify the server is running.
 Get the latest sensor reading for **every cattle** (dashboard overview).
 
 ```bash
-curl http://localhost:8000/api/v1/cattle/latest
+curl -H "X-API-Key: cattle_monitoring_secure_key" http://localhost:8000/api/v1/cattle/latest
 ```
 
 **Response:**
@@ -246,7 +272,7 @@ curl http://localhost:8000/api/v1/cattle/latest
 Get the most recent sensor reading for a cattle.
 
 ```bash
-curl http://localhost:8000/api/v1/cattle/1/latest
+curl -H "X-API-Key: cattle_monitoring_secure_key" http://localhost:8000/api/v1/cattle/1/latest
 ```
 
 **Response:**
@@ -271,14 +297,14 @@ Get the last N sensor records (newest first).
 | `limit` | int | 100 | Number of records (1–5000) |
 
 ```bash
-curl "http://localhost:8000/api/v1/cattle/1/recent?limit=50"
+curl -H "X-API-Key: cattle_monitoring_secure_key" "http://localhost:8000/api/v1/cattle/1/recent?limit=50"
 ```
 
 #### `GET /api/v1/cattle/{cid}/last-hour`
 Get all sensor readings from the past 1 hour (sorted ascending).
 
 ```bash
-curl http://localhost:8000/api/v1/cattle/1/last-hour
+curl -H "X-API-Key: cattle_monitoring_secure_key" http://localhost:8000/api/v1/cattle/1/last-hour
 ```
 
 #### `GET /api/v1/cattle/{cid}/range?start=...&end=...`
@@ -290,7 +316,7 @@ Get sensor readings between two ISO 8601 timestamps.
 | `end` | datetime | ✅ | End time (ISO 8601) |
 
 ```bash
-curl "http://localhost:8000/api/v1/cattle/1/range?start=2026-02-04T22:00:00&end=2026-02-04T23:59:59"
+curl -H "X-API-Key: cattle_monitoring_secure_key" "http://localhost:8000/api/v1/cattle/1/range?start=2026-02-04T22:00:00&end=2026-02-04T23:59:59"
 ```
 
 ---
@@ -301,7 +327,7 @@ curl "http://localhost:8000/api/v1/cattle/1/range?start=2026-02-04T22:00:00&end=
 Get health alerts for a specific cattle, newest first.
 
 ```bash
-curl "http://localhost:8000/api/v1/cattle/1/health-events?limit=20"
+curl -H "X-API-Key: cattle_monitoring_secure_key" "http://localhost:8000/api/v1/cattle/1/health-events?limit=20"
 ```
 
 **Response:**
@@ -315,7 +341,7 @@ curl "http://localhost:8000/api/v1/cattle/1/health-events?limit=20"
 Get recent health alerts across all cattle (dashboard alert panel).
 
 ```bash
-curl "http://localhost:8000/api/v1/health-events/recent?limit=20"
+curl -H "X-API-Key: cattle_monitoring_secure_key" "http://localhost:8000/api/v1/health-events/recent?limit=20"
 ```
 
 **Response:**
@@ -426,10 +452,13 @@ First register a cattle, then send sensor data:
 # 1. Register the cattle
 curl -X POST http://localhost:8000/api/v1/cattle \
   -H "Content-Type: application/json" \
+  -H "X-API-Key: cattle_monitoring_secure_key" \
   -d '{ "cid": 1, "name": "Cow-01", "farm_id": "Farm-A", "breed": "HF", "age": 4, "status": "active" }'
 
 # 2. Send sensor data
 curl -X POST http://localhost:8000/api/v1/cattle/sensor/bulk \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: cattle_monitoring_secure_key" \
   -H "Content-Type: application/json" \
   -d '{
     "cid": 1,

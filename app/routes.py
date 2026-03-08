@@ -3,7 +3,8 @@ API route definitions.
 """
 
 from datetime import datetime
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
+from app.auth import verify_api_key
 from app.models import (
     SensorBulkRequest,
     BulkInsertResponse,
@@ -31,9 +32,9 @@ from app.services import (
     get_recent_health_events,
 )
 
-cattle_router = APIRouter(prefix="/api/v1/cattle", tags=["Cattle Management"])
-sensor_router = APIRouter(prefix="/api/v1/cattle", tags=["Sensor Data"])
-health_router = APIRouter(prefix="/api/v1", tags=["Health Events"])
+cattle_router = APIRouter(prefix="/api/v1/cattle", tags=["Cattle Management"], dependencies=[Depends(verify_api_key)])
+sensor_router = APIRouter(prefix="/api/v1/cattle", tags=["Sensor Data"], dependencies=[Depends(verify_api_key)])
+health_router = APIRouter(prefix="/api/v1", tags=["Health Events"], dependencies=[Depends(verify_api_key)])
 
 
 # ══════════════════════════════════════════

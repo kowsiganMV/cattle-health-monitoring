@@ -4,6 +4,18 @@ Base URL: `http://localhost:8000`
 
 ---
 
+## Authorization
+
+All endpoints (except `/`) require the `X-API-Key` header.
+
+```
+X-API-Key: cattle_monitoring_secure_key
+```
+
+Missing or invalid key → `401 Unauthorized`.
+
+---
+
 ## Health Check
 
 | Method | Endpoint | Description |

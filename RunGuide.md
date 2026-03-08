@@ -165,6 +165,20 @@ FastAPI auto-generates interactive API docs.
 
 ---
 
+## API Authorization
+
+All API endpoints (except health check `/`) require a valid API key in the `X-API-Key` header.
+
+```bash
+curl -H "X-API-Key: cattle_monitoring_secure_key" http://localhost:8000/api/v1/cattle
+```
+
+If the key is missing or invalid, the API returns `401 Unauthorized`.
+
+The API key is set via the `API_SECRET_KEY` environment variable in `.env`.
+
+---
+
 ## API Endpoints
 
 ### 1. Health Check
