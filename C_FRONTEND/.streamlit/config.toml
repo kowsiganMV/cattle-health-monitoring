@@ -1,0 +1,11 @@
+[theme]
+# Only set primaryColor; let CSS injection handle the rest dynamically
+primaryColor = "#0969DA"
+font = "sans serif"
+
+[server]
+headless = true
+port = 8501
+
+[browser]
+gatherUsageStats = false

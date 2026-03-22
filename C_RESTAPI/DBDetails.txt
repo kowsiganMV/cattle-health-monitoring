@@ -1,0 +1,4 @@
+kowsiganmv_db_user : BD1kyL7lwdZhtU1b
+
+
+API : mongodb+srv://kowsiganmv_db_user:BD1kyL7lwdZhtU1b@cstore1.xduenjk.mongodb.net/?appName=CStore1
