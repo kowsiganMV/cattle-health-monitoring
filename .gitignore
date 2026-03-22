@@ -1,0 +1,55 @@
+# ── Python ──
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+*.whl
+
+# ── Virtual Environments ──
+venv/
+.venv/
+env/
+ENV/
+
+# ── Environment Variables (secrets) ──
+.env
+.env.*
+!.env.example
+
+# ── IDE / Editor ──
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ── Streamlit ──
+.streamlit/secrets.toml
+
+# ── Logs ──
+*.log
+logs/
+
+# ── OS ──
+.DS_Store
+Desktop.ini
+
+# ── Test / Coverage ──
+.coverage
+htmlcov/
+.pytest_cache/
+.tox/
+
+# ── Docker ──
+*.pid
+
+# ── Session / Temp ──
+.copilot/
+tmp/
+temp/
