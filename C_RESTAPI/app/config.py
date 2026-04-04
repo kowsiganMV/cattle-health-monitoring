@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     # Alert System Configuration
     ALERT_THRESHOLD: int = 4
     GRAPH_TIME_WINDOW: int = 48
+    DEFAULT_DOCTOR_EMAIL: str = "kowsiganmv@gmail.com"
 
     # Health Thresholds (configurable per deployment)
     TEMP_HIGH: float = 39.5

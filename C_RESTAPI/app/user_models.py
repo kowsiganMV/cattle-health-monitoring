@@ -22,6 +22,7 @@ class UserCreate(BaseModel):
     email: str = Field(..., min_length=5)
     password: str = Field(..., min_length=8, max_length=128)
     full_name: str = Field(..., min_length=1, max_length=100)
+    phone: Optional[str] = Field(default=None, max_length=20, description="Contact phone number")
     role: str = Field(default="user")
     farm_ids: list[str] = Field(default_factory=list)
 
@@ -56,6 +57,7 @@ class UserLogin(BaseModel):
 class UserUpdate(BaseModel):
     """Request body for updating a user. All fields optional."""
     full_name: Optional[str] = Field(default=None, max_length=100)
+    phone: Optional[str] = Field(default=None, max_length=20)
     role: Optional[str] = None
     farm_ids: Optional[list[str]] = None
     is_active: Optional[bool] = None
@@ -76,6 +78,7 @@ class UserResponse(BaseModel):
     username: str
     email: str
     full_name: str
+    phone: Optional[str] = None
     role: str
     farm_ids: list[str]
     is_active: bool

@@ -13,6 +13,7 @@ Backend service that receives bulk sensor data from ESP32 devices and stores it 
 | Config | pydantic-settings | Type-safe env var loading from `.env` |
 | Auth | python-jose + bcrypt | JWT tokens + industry-standard password hashing |
 | Alerts | matplotlib + smtplib | Health graph generation + email notifications |
+| ML Engine | scikit-learn + scipy | Cattle behavior classification (RandomForest) |
 
 ## Project Structure
 
@@ -25,18 +26,21 @@ C_RESTAPI/
 │   ├── config.py          # Environment variable settings (JWT, SMTP, thresholds)
 │   ├── database.py        # MongoDB connection, indexes & collection setup
 │   ├── logger.py          # Async logging to MongoDB logs collection
-│   ├── models.py          # Pydantic models (cattle/sensor)
+│   ├── ml_model.py        # ML model loading, feature extraction & prediction
+│   ├── models.py          # Pydantic models (cattle/sensor/prediction)
 │   ├── user_models.py     # Pydantic models (users/auth)
 │   ├── alert_models.py    # Pydantic models (health alerts)
-│   ├── routes.py          # Cattle/sensor/health endpoints (RBAC-protected)
+│   ├── routes.py          # Cattle/sensor/health/status endpoints (RBAC-protected)
 │   ├── user_routes.py     # Auth & user management endpoints
 │   ├── alert_routes.py    # Health alert & evaluation endpoints
-│   ├── services.py        # Data transformation & DB operations
+│   ├── services.py        # Data transformation, DB operations & ML prediction
 │   ├── user_services.py   # User CRUD, bcrypt, JWT management
 │   ├── alert_services.py  # Alert orchestration, counter tracking, notifications
 │   ├── health_evaluator.py # Sensor data → health status evaluation engine
 │   ├── graph_service.py   # Matplotlib time-series graph generation
 │   └── email_service.py   # SMTP email with embedded health graphs
+├── cattle_model_v4.pkl    # Trained RandomForest ML model (joblib)
+├── le_v4.pkl              # Label encoder for behavior classes
 ├── data.json              # Sample ESP32 sensor data
 ├── requirements.txt
 ├── Dockerfile
@@ -49,16 +53,33 @@ C_RESTAPI/
 
 ```
 ESP32 Device → FastAPI Backend → MongoDB Atlas (Database: CDataBase)
+                    ↓
+             ML Model (RandomForest) → Behavior Classification → Health Status
 ```
 
-Collections: `cattle` · `cattle_sensor_data_ts` · `cattle_health_events` · `users` · `health_alerts` · `alert_counters` · `logs`
+Collections: `cattle` · `cattle_sensor_data_ts` · `cattle_health_events` · `users` · `health_alerts` · `alert_counters` · `ml_predictions` · `logs`
 
 ## MongoDB Schema
 
 **Database:** `CDataBase`
 
 ### Collection: `cattle`
-Stores cattle metadata (CID, name, farm, breed, age, status).
+Stores cattle metadata (CID, name, farm, breed, age, doctor/owner assignment, status).
+
+Example document:
+```json
+{
+  "cid": 1,
+  "name": "Cow-Alpha",
+  "farm_id": "farm_001",
+  "breed": "Jersey",
+  "age": 3,
+  "doctor_id": "admin",
+  "owner_id": "farmer",
+  "status": "active",
+  "created_at": "2026-03-22T..."
+}
+```
 
 ### Collection: `cattle_sensor_data_ts` *(Time Series)*
 Stores transformed time-series sensor readings from ESP32 devices.
@@ -91,9 +112,10 @@ Example document:
 ```json
 {
   "username": "admin1",
-  "email": "admin@farm.com",
+  "email": "doctor@clinic.com",
   "hashed_password": "$2b$12$...",
-  "full_name": "Farm Admin",
+  "full_name": "Dr. Veterinary",
+  "phone": "9876543210",
   "role": "admin",
   "farm_ids": ["Farm-A", "Farm-B"],
   "is_active": true,
@@ -106,16 +128,17 @@ Example document:
 Stores alerts and anomaly events.
 
 ### Collection: `health_alerts`
-Stores health alert records with admin notification tracking.
+Stores health alert records with doctor notification tracking.
 
 Example document:
 ```json
 {
   "cid": 1,
-  "admin_username": "admin",
-  "admin_email": "admin@farm.com",
+  "doctor_id": "admin",
+  "doctor_email": "doctor@clinic.com",
+  "doctor_name": "Dr. Veterinary",
   "status": "critical",
-  "consecutive_count": 4,
+  "consecutive_count": 5,
   "email_sent": true,
   "health_details": { "overall_status": "bad", "reasons": ["High temperature: 40.2°C"], "latest_temperature": 40.2, "latest_bpm": 73 },
   "graph_generated": true,
@@ -125,6 +148,21 @@ Example document:
 
 ### Collection: `alert_counters`
 Tracks consecutive bad readings per cattle for alert escalation.
+
+### Collection: `ml_predictions`
+Stores ML behavior predictions generated after sensor data ingestion.
+
+Example document:
+```json
+{
+  "cid": 1,
+  "prediction": "Grazing",
+  "status": "normal",
+  "window_count": 20,
+  "window_predictions": ["Grazing", "Grazing", "Walking", "Grazing", ...],
+  "timestamp": "2026-03-08T18:30:00Z"
+}
+```
 
 ### Collection: `logs` *(Time Series)*
 Stores structured backend operation logs for debugging and monitoring.
@@ -152,12 +190,13 @@ Example document:
 
 ### Indexes
 ```
-cattle:                  { cid: 1 }  (unique)
+cattle:                  { cid: 1 } (unique), { doctor_id: 1 }, { owner_id: 1 }
 cattle_sensor_data_ts:   { cid: 1, timestamp_iso: -1 }
 cattle_health_events:    { cid: 1 }, { timestamp: -1 }
 users:                   { username: 1 } (unique), { email: 1 } (unique)
 health_alerts:           { cid: 1 }, { timestamp: -1 }, { cid: 1, timestamp: -1 }
 alert_counters:          { cid: 1 } (unique)
+ml_predictions:          { cid: 1, timestamp: -1 }, { cid: 1 }
 logs:                    { service: 1, timestamp: -1 }, { cid: 1 }
 ```
 
@@ -167,18 +206,21 @@ The API supports **two authentication methods**:
 
 ### 1. JWT Bearer Token (for users/dashboard)
 
-First bootstrap the admin user, then login to get a token:
+Default seed users are created on first startup:
+
+| Username | Role | Password | Email |
+|----------|------|----------|-------|
+| `dev` | super_admin | `dev@123!Secure` | dev@cattlemonitor.com |
+| `admin` | admin (vet doctor) | `admin@123!Secure` | kowsiganmv@gmail.com |
+| `farmer` | user (farmer) | `farmer@123!Secure` | farmer@cattlemonitor.com |
+
+Login to get a token:
 
 ```bash
-# Bootstrap first admin (only works once when no users exist)
-curl -X POST http://localhost:8000/api/v1/auth/bootstrap \
-  -H "Content-Type: application/json" \
-  -d '{"username":"admin","email":"admin@farm.com","password":"SecurePass123","full_name":"Farm Admin","farm_ids":["Farm-A"]}'
-
-# Login
+# Login as veterinary doctor
 curl -X POST http://localhost:8000/api/v1/auth/login \
   -H "Content-Type: application/json" \
-  -d '{"username":"admin","password":"SecurePass123"}'
+  -d '{"username":"admin","password":"admin@123!Secure"}'
 
 # Use the token
 curl -H "Authorization: Bearer <token>" http://localhost:8000/api/v1/cattle
@@ -194,8 +236,15 @@ X-API-Key: cattle_monitoring_secure_key
 
 | Role | Permissions |
 |------|------------|
-| **admin** | Full CRUD on cattle in assigned farms, manage users, ingest sensor data |
-| **user** | Read-only access to cattle/sensor/health data in assigned farms |
+| **super_admin** | Unrestricted access to all farms and resources |
+| **admin** | Veterinary doctor — manages cattle in assigned farms, receives alerts |
+| **user** | Farmer — read-only access to cattle/sensor/health data in assigned farms |
+
+### Doctor-Cattle Mapping
+
+- Each cattle can have a `doctor_id` (username of the assigned vet)
+- When a critical health alert triggers, the email goes to the doctor's registered email
+- If no doctor is assigned, email falls back to `DEFAULT_DOCTOR_EMAIL` (kowsiganmv@gmail.com)
 
 ### Resource Ownership
 
@@ -221,11 +270,12 @@ ESP32 sends flat data → backend converts to structured format:
 
 #### `POST /api/v1/auth/bootstrap`
 Create the first admin user. **Only works when no users exist** (open, no auth).
+Note: Default seed users are auto-created on startup, so bootstrap is typically not needed.
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/auth/bootstrap \
   -H "Content-Type: application/json" \
-  -d '{"username":"admin","email":"admin@farm.com","password":"SecurePass123","full_name":"Farm Admin","farm_ids":["Farm-A"]}'
+  -d '{"username":"admin","email":"vet@clinic.com","password":"SecurePass123","full_name":"Dr. Vet","phone":"9876543210","farm_ids":["farm_001"]}'
 ```
 
 #### `POST /api/v1/auth/login`
@@ -234,7 +284,7 @@ Authenticate and receive a JWT token.
 ```bash
 curl -X POST http://localhost:8000/api/v1/auth/login \
   -H "Content-Type: application/json" \
-  -d '{"username":"admin","password":"SecurePass123"}'
+  -d '{"username":"admin","password":"admin@123!Secure"}'
 ```
 
 **Response:**
@@ -243,7 +293,7 @@ curl -X POST http://localhost:8000/api/v1/auth/login \
   "access_token": "eyJhbGciOiJIUzI1NiIs...",
   "token_type": "bearer",
   "expires_in": 3600,
-  "user": { "username": "admin", "email": "admin@farm.com", "role": "admin", ... }
+  "user": { "username": "admin", "email": "vet@clinic.com", "role": "admin", "phone": "9876543210", ... }
 }
 ```
 
@@ -323,13 +373,13 @@ The counter resets automatically when a healthy reading is detected.
 ### Cattle Management
 
 #### `POST /api/v1/cattle`
-Register a new cattle in the system.
+Register a new cattle in the system. Optionally assign a doctor and owner by username.
 
 ```bash
 curl -X POST http://localhost:8000/api/v1/cattle \
   -H "Content-Type: application/json" \
   -H "X-API-Key: cattle_monitoring_secure_key" \
-  -d '{ "cid": 1, "name": "Cow-01", "farm_id": "Farm-A", "breed": "HF", "age": 4, "status": "active" }'
+  -d '{ "cid": 1, "name": "Cow-01", "farm_id": "farm_001", "breed": "HF", "age": 4, "doctor_id": "admin", "owner_id": "farmer" }'
 ```
 
 **Response:**
@@ -347,8 +397,8 @@ curl -H "X-API-Key: cattle_monitoring_secure_key" http://localhost:8000/api/v1/c
 **Response:**
 ```json
 [
-  { "cid": 1, "name": "Cow-01", "farm_id": "Farm-A", "breed": "HF", "age": 4, "status": "active", "created_at": "2026-02-04T23:31:48Z" },
-  { "cid": 2, "name": "Cow-02", "farm_id": "Farm-A", "breed": "Jersey", "age": 3, "status": "active", "created_at": "2026-02-05T10:00:00Z" }
+  { "cid": 1, "name": "Cow-01", "farm_id": "farm_001", "breed": "HF", "age": 4, "doctor_id": "admin", "owner_id": "farmer", "status": "active", "created_at": "2026-02-04T23:31:48Z" },
+  { "cid": 2, "name": "Cow-02", "farm_id": "farm_001", "breed": "Jersey", "age": 3, "doctor_id": "admin", "status": "active", "created_at": "2026-02-05T10:00:00Z" }
 ]
 ```
 
@@ -361,7 +411,7 @@ curl -H "X-API-Key: cattle_monitoring_secure_key" http://localhost:8000/api/v1/c
 
 **Response:**
 ```json
-{ "cid": 1, "name": "Cow-01", "farm_id": "Farm-A", "breed": "HF", "age": 4, "status": "active", "created_at": "2026-02-04T23:31:48Z" }
+{ "cid": 1, "name": "Cow-01", "farm_id": "farm_001", "breed": "HF", "age": 4, "doctor_id": "admin", "owner_id": "farmer", "status": "active", "created_at": "2026-02-04T23:31:48Z" }
 ```
 
 #### `PUT /api/v1/cattle/{cid}`
@@ -412,7 +462,13 @@ Receive bulk sensor data from an ESP32 device, transform, and store in MongoDB.
   "success": true,
   "cid": 1,
   "inserted_count": 1,
-  "message": "Successfully inserted 1 sensor readings for cattle 1"
+  "message": "Successfully inserted 1 sensor readings for cattle 1",
+  "prediction": {
+    "behavior": "Grazing",
+    "status": "normal",
+    "window_count": 1,
+    "window_predictions": ["Grazing"]
+  }
 }
 ```
 
@@ -463,6 +519,35 @@ curl -H "X-API-Key: cattle_monitoring_secure_key" http://localhost:8000/api/v1/c
   "heart": { "signal": 1833, "peak": 0, "down": 0, "bpm": 0 },
   "created_at": "2026-02-04T23:35:00Z"
 }
+```
+
+#### `GET /api/v1/cattle/{cid}/status`
+Get real-time health status using ML behavior prediction. Fetches latest sensor data, runs the ML model, and returns the predicted behavior and derived health status.
+
+```bash
+curl -H "X-API-Key: cattle_monitoring_secure_key" http://localhost:8000/api/v1/cattle/1/status
+```
+
+**Response:**
+```json
+{
+  "cid": 1,
+  "behavior": "Grazing",
+  "status": "normal",
+  "temperature": 38.5,
+  "bpm": 72.0,
+  "timestamp": "2026-03-08T18:30:00Z"
+}
+```
+
+**Status values:**
+
+| Status | Meaning |
+|--------|---------|
+| `normal` | Expected behavior, vitals within healthy range |
+| `warning` | Unusual behavior detected (e.g., "Other" classification) |
+| `anomaly` | Abnormal vitals (temperature or BPM out of range) |
+| `unknown` | Insufficient data or model unavailable |
 ```
 
 #### `GET /api/v1/cattle/{cid}/recent?limit=100`
@@ -549,6 +634,7 @@ curl -H "X-API-Key: cattle_monitoring_secure_key" "http://localhost:8000/api/v1/
 | `POST` | `/api/v1/cattle/sensor/bulk` | Admin / API Key | Bulk ingest sensor data |
 | `GET` | `/api/v1/cattle/latest` | Authenticated | Latest reading (all cattle) |
 | `GET` | `/api/v1/cattle/{cid}/latest` | Authenticated | Most recent sensor reading |
+| `GET` | `/api/v1/cattle/{cid}/status` | Authenticated | ML-based real-time health status |
 | `GET` | `/api/v1/cattle/{cid}/recent?limit=N` | Authenticated | Last N sensor records |
 | `GET` | `/api/v1/cattle/{cid}/last-hour` | Authenticated | Readings from past hour |
 | `GET` | `/api/v1/cattle/{cid}/range?start=&end=` | Authenticated | Readings in time range |
@@ -624,39 +710,84 @@ The backend records all database actions and important system events in the `log
 - Cattle creation and updates
 - Sensor bulk uploads (success and failure)
 - Invalid cattle ID rejections
+- **ML predictions** (behavior, status, cattle ID)
 - Database errors
 
 **Log levels:** `INFO`, `WARNING`, `ERROR`, `DEBUG`
 
-**Service identifiers:** `sensor_api`, `cattle_api`, `health_event_api`, `system`
+**Service identifiers:** `sensor_api`, `cattle_api`, `health_event_api`, `ml_engine`, `system`
+
+---
+
+## ML Model Integration
+
+The system includes a trained **RandomForest classifier** that predicts cattle behavior from sensor data in real time.
+
+### How It Works
+
+1. **Model Loading**: The ML model (`cattle_model_v4.pkl`) is loaded once at application startup using joblib.
+2. **Feature Extraction**: Raw accelerometer + temperature data is segmented into 10-second windows. For each window, 24 features are computed:
+   - **Statistical**: mean, std, skewness, kurtosis per axis
+   - **Frequency**: FFT dominant frequency and amplitude per axis
+   - **Activity**: Signal Magnitude Area (SMA)
+   - **Temperature**: mean and standard deviation
+   - **Lag**: previous window's SMA, temperature, and predicted behavior
+3. **Prediction**: The pipeline (SimpleImputer → RandomForest with 500 trees) classifies each window into one of 7 behaviors.
+4. **Health Status**: The behavior prediction is combined with vital sign thresholds to derive a health status.
+
+### Behavior Classes
+
+| Behavior | Description |
+|----------|-------------|
+| Grazing | Consuming grass/feed — rhythmic head movement |
+| Walking | Directed locomotion — high activity |
+| Standing | Stationary upright posture — low activity |
+| Lying | Recumbent posture — very low activity |
+| Ruminating | Re-chewing cud — periodic jaw movement |
+| Drinking | Consuming water — sharp Z-axis spikes |
+| Other | Miscellaneous/transitional behavior |
+
+### Health Status Derivation
+
+| Status | Condition |
+|--------|-----------|
+| `normal` | Expected behavior + vitals in range (temp 35–39.5°C, BPM 30–100) |
+| `warning` | "Other" behavior detected (unusual/transitional) |
+| `anomaly` | Temperature or BPM outside healthy range |
+
+### Data Flow
+
+```
+ESP32 → Bulk Upload → Store in DB → Extract 10s Windows
+                                   → Compute 24 Features
+                                   → RandomForest Predict
+                                   → Derive Health Status
+                                   → Store Prediction + Log
+                                   → Return in API Response
+```
 
 ---
 
 ## Test with Sample Data
 
-First register a cattle, then send sensor data:
+First register a cattle (with doctor assignment), then send sensor data:
 
 ```bash
-# 1. Register the cattle
+# 1. Register the cattle with assigned doctor
 curl -X POST http://localhost:8000/api/v1/cattle \
   -H "Content-Type: application/json" \
   -H "X-API-Key: cattle_monitoring_secure_key" \
-  -d '{ "cid": 1, "name": "Cow-01", "farm_id": "Farm-A", "breed": "HF", "age": 4, "status": "active" }'
+  -d '{ "cid": 1, "name": "Cow-01", "farm_id": "farm_001", "breed": "HF", "age": 4, "doctor_id": "admin", "owner_id": "farmer" }'
 
-# 2. Send sensor data
+# 2. Send normal sensor data
 curl -X POST http://localhost:8000/api/v1/cattle/sensor/bulk \
   -H "Content-Type: application/json" \
   -H "X-API-Key: cattle_monitoring_secure_key" \
+  -d @sample_normal.json
+
+# 3. Send critical sensor data (triggers ML anomaly detection)
+curl -X POST http://localhost:8000/api/v1/cattle/sensor/bulk \
   -H "Content-Type: application/json" \
-  -d '{
-    "cid": 1,
-    "data": [{
-      "timestamp_iso": "2026-02-04T23:31:48.120",
-      "timestamp_ms": 2122,
-      "temp_c": 28.47,
-      "ax": -3384, "ay": -8684, "az": 13392,
-      "gx": -145, "gy": 84, "gz": -12,
-      "signal": 1818, "peak": 1, "down": 0, "bpm": 0
-    }]
-  }'
+  -H "X-API-Key: cattle_monitoring_secure_key" \
+  -d @sample_critical.json
 ```
