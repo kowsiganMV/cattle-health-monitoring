@@ -1,8 +1,9 @@
 """
 ML Model integration module for cattle behavior classification.
 
-Loads the trained RandomForest pipeline from cattle_model_v4.pkl and provides
-feature extraction and prediction functions for real-time cattle monitoring.
+Downloads the trained RandomForest pipeline from Google Drive (if not cached
+locally) and provides feature extraction and prediction functions for
+real-time cattle monitoring.
 
 Model expects 24 features per 10-second window:
   - 8 base statistical (accel mean/std per axis, SMA, temp_mean)
@@ -22,6 +23,9 @@ from typing import Optional
 
 import numpy as np
 from scipy import stats as scipy_stats
+import gdown
+
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -47,26 +51,76 @@ _cattle_lag_state: dict[int, dict] = {}
 
 
 # ══════════════════════════════════════════
+#  Google Drive Download
+# ══════════════════════════════════════════
+
+
+def _gdrive_url(file_id: str) -> str:
+    """Build a Google Drive direct-download URL."""
+    return f"https://drive.google.com/uc?id={file_id}"
+
+
+def _ensure_model_files() -> tuple[Path, Path]:
+    """
+    Ensure model and label encoder files exist locally.
+    Downloads from Google Drive if missing.
+    Returns (model_path, label_path).
+    """
+    model_dir = Path(settings.MODEL_DIR)
+    model_dir.mkdir(parents=True, exist_ok=True)
+
+    model_path = model_dir / settings.MODEL_FILENAME
+    label_path = model_dir / settings.LABEL_FILENAME
+
+    if not model_path.exists():
+        url = _gdrive_url(settings.MODEL_GDRIVE_ID)
+        print(f"⬇️  Downloading ML model from Google Drive …")
+        logger.info("Downloading model from Google Drive: %s", url)
+        try:
+            gdown.download(url, str(model_path), quiet=False)
+            print(f"✅ Model downloaded → {model_path}")
+            logger.info("Model downloaded successfully: %s", model_path)
+        except Exception as e:
+            logger.error("Model download failed: %s", e)
+            print(f"❌ Model download failed: {e}")
+
+    if not label_path.exists():
+        url = _gdrive_url(settings.LABEL_GDRIVE_ID)
+        print(f"⬇️  Downloading label encoder from Google Drive …")
+        logger.info("Downloading label encoder from Google Drive: %s", url)
+        try:
+            gdown.download(url, str(label_path), quiet=False)
+            print(f"✅ Label encoder downloaded → {label_path}")
+            logger.info("Label encoder downloaded successfully: %s", label_path)
+        except Exception as e:
+            logger.error("Label encoder download failed: %s", e)
+            print(f"❌ Label encoder download failed: {e}")
+
+    return model_path, label_path
+
+
+# ══════════════════════════════════════════
 #  Model Loading
 # ══════════════════════════════════════════
 
 
-def load_model(model_path: str = "cattle_model_v4.pkl") -> None:
+def load_model() -> None:
     """
-    Load the trained ML model dictionary from disk.
+    Download (if needed) and load the trained ML model.
     Expected dict keys: pipeline, label_encoder, feature_cols, behavior_map.
     Call once at application startup.
     """
     global _pipeline, _label_encoder, _feature_cols, _behavior_map, _model_loaded
 
-    path = Path(model_path)
-    if not path.exists():
-        logger.warning("ML model file not found: %s", model_path)
-        print(f"⚠️  ML model file not found: {model_path}")
+    model_path, _label_path = _ensure_model_files()
+
+    if not model_path.exists():
+        logger.warning("ML model file not available after download attempt: %s", model_path)
+        print(f"⚠️  ML model file not available: {model_path}")
         return
 
     try:
-        model_dict = joblib.load(model_path)
+        model_dict = joblib.load(str(model_path))
 
         _pipeline = model_dict["pipeline"]
         _label_encoder = model_dict["label_encoder"]
